@@ -39,7 +39,6 @@ class WXPayUtil {
       }
     });
     str += `key=${key}`;
-    console.log(str,4)
     if (SignType.MD5 === signType) {
       return CryptoJS.MD5(str).toString(CryptoJS.enc.MD5).toUpperCase();
     } else if (SignType.HMACSHA256 === signType) {

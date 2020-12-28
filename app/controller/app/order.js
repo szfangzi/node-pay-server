@@ -10,6 +10,14 @@ class OrderController extends Controller {
     if (!orders) return ok('订单为空', ctx);
     ok({ list: orders }, ctx);
   }
+
+  // async searchOrderById() {
+  //   const { ctx, app } = this;
+  //   const orders = await app.mysql.select('tb_order', { where: { user_id: ctx.userId } });
+  //   if (!orders) return ok('订单为空', ctx);
+  //   ok({ list: orders }, ctx);
+  // }
+
 }
 
 module.exports = OrderController;

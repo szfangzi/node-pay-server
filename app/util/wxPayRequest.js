@@ -17,7 +17,6 @@ class WXPayRequest {
   }
 
   async requestOnce(domain, urlSuffix, msgUUID, data, useCert) {
-    // BasicHttpClientConnectionManager connManager;
     if (useCert) {
       //   // 证书
       //   char[] password = config.getMchID().toCharArray();
@@ -54,7 +53,6 @@ class WXPayRequest {
       const res = await axios.post(url, data, {
         headers: {
           contentType: 'text/xml',
-          userAgent: ' ' + this.mchId,
         },
       });
       return res.data;

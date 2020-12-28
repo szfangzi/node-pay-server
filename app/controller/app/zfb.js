@@ -2,26 +2,33 @@
 
 const { ok, error } = require('../../util/result');
 const Controller = require('egg').Controller;
-const WXPay = require('../../util/wxPay');
-const WXPayUtil = require('../../util/wxPayUtil');
+const AlipaySdk = require('alipay-sdk').default;
 const AuthUtil = require('../../util/auth');
-const { WXPayConstants } = require('../../util/wxPayConstants');
+const WXPayUtil = require('../../util/wxPayUtil');
 const { SignType } = require('../../util/wxPayConstants');
 
-class WxController extends Controller {
+class ZfbController extends Controller {
   async login() {
     const { ctx, app } = this;
-    const { code, nickname, photo } = ctx.request.body;
-    const { openid } = await ctx.service.app.wx.getOpenId(code);
-    if (!openid) {
-      return error('临时登陆凭证错误', ctx);
-    }
+    const { authCode, nickname, photo } = ctx.request.body;
+    const alipaySdk = new AlipaySdk({
+      appId: app.config.zfb.microApp.appId,
+      privateKey: app.config.zfb.microApp.privateKey,
+      gateway: app.config.zfb.gateway,
+    });
+    const result = await alipaySdk.exec('alipay.system.oauth.token', {
+      // 请求参数
+      grantType: 'authorization_code',
+      code: authCode,
+    });
+    const openid = result.userId;
+    if (!openid) return error('临时登陆凭证错误', ctx);
     const user = { open_id: openid };
     let sqlRes = await app.mysql.get('tb_user', user);
     let userId = 0;
     // 找不到user就是没注册，先注册
     if (!sqlRes) {
-      Object.assign(user, { nickname, photo, create_time: new Date(), type: 2 });
+      Object.assign(user, { nickname, photo, create_time: new Date(), type: 3 });
       sqlRes = await app.mysql.insert('tb_user', user);
       if (sqlRes.insertId) {
         userId = sqlRes.insertId;
@@ -48,48 +55,34 @@ class WxController extends Controller {
     }
     const amount = sqlRes.amount;
     const orderCode = sqlRes.code;
-    const myWXPayConfig = app.config.wx;
-
-    // 有待开发
-    // 验证购物券是否有效
-    // 验证团购活动是否有效
+    const config = {
+      appId: app.config.zfb.microApp.appId,
+      privateKey: app.config.zfb.microApp.privateKey,
+      publicKey: app.config.zfb.microApp.publicKey,
+      gateway: app.config.zfb.gateway,
+    };
 
     try {
-      // 向微信平台发出请求，创建支付订单
-      const wxPay = new WXPay(myWXPayConfig);
+      const alipaySdk = new AlipaySdk(config);
       const payParams = {
-        body: '订单备注',
-        out_trade_no: orderCode.substring(1) + WXPayUtil.generateNonceStr()[0],
-        total_fee: amount,
-        spbill_create_ip: '127.0.0.1',
-        notify_url: 'http://jp-tyo-dvm-2.sakurafrp.com:19641/app/wx/recieveMessage',
-        trade_type: 'JSAPI',
-        openid,
+        bizContent: {
+          outTradeNo: orderCode.substring(1) + WXPayUtil.generateNonceStr()[0],
+          totalAmount: amount,
+          subject: '商品标题1',
+          buyerId: openid,
+        },
       };
-      const resPayOrder = await wxPay.unifiedOrder(payParams);
-      if (resPayOrder.return_code === WXPayConstants.FAIL) return error(resPayOrder.return_msg, ctx);
-      if (resPayOrder.result_code === WXPayConstants.FAIL) return error(resPayOrder.err_code_des, ctx);
-      const prepay_id = resPayOrder.prepay_id;
-      if (prepay_id) {
-        await app.mysql.update('tb_order', { id: 1, prepay_id, payment_type: 1 });
-        const appId = app.config.wx.appId;
-        const timeStamp = Date.now().toString();
-        const nonceStr = WXPayUtil.generateNonceStr();
-        const packageStr = `prepay_id=${prepay_id}`;
-        const signType = SignType.MD5;
-        const paySign = WXPayUtil.generateSignature({
-          appId,
-          timeStamp,
-          nonceStr,
-          package: packageStr,
-          signType,
-        }, app.config.wx.key);
-        return ok({ prepay_id, timeStamp, paySign, nonceStr, package: packageStr }, ctx);
+      const resPayOrder = await alipaySdk.exec('alipay.trade.create', payParams);
+      if (resPayOrder.code !== '10000') return error(resPayOrder.msg, ctx);
+      const prepayId = resPayOrder.tradeNo;
+      if (prepayId) {
+        await app.mysql.update('tb_order', { id: 1, prepay_id: prepayId, payment_type: 2 });
+        return ok({ prepayId }, ctx);
       }
       return error('订单创建失败!', ctx);
 
     } catch (e) {
-      return error('微信支付模块故障!', ctx);
+      return error('支付宝支付模块故障!', ctx);
     }
 
   }
@@ -220,9 +213,10 @@ class WxController extends Controller {
     }
   }
 
-  async recieveMessage() {
+  async recieveMicroMessage() {
     const { ctx, app } = this;
     const buffers = [];
+    console.log(ctx.request, 944);
     ctx.req.on('data', chunk => {
       buffers.push(chunk);
     });
@@ -230,29 +224,39 @@ class WxController extends Controller {
     ctx.req.on('end', async () => {
       const xml = Buffer.concat(buffers).toString();
       const map = WXPayUtil.xmlToMap(xml);
+      console.log(map,123);
       if (map.return_code === WXPayConstants.SUCCESS && map.result_code === WXPayConstants.SUCCESS) {
         await app.mysql.update('tb_order', { id: 1, status: 2 });
         const buf = Buffer.from('<xml><return_code><![CDATA[SUCCESS]]></return_code> <return_msg><![CDATA[OK]]></return_msg></xml>');
         ctx.body = buf;
       }
-      // {
-      //   appid: 'wx4cb8e9621950da45',
-      //     bank_type: 'OTHERS',
-      //   cash_fee: '1',
-      //   fee_type: 'CNY',
-      //   is_subscribe: 'N',
-      //   mch_id: '1526972031',
-      //   nonce_str: 'ZUN0JB1S6OAYA4PWLOFHVCNMIZ6470AK',
-      //   openid: 'oNlSI5CKp8O5HRjvrl6lK0y4NJ8k',
-      //   out_trade_no: 'X0000000120160529M',
-      //   result_code: 'SUCCESS',
-      //   return_code: 'SUCCESS',
-      //   sign: 'C6BEF0AE218D3CD64C7DC38614624E66',
-      //   time_end: '20201217153754',
-      //   total_fee: 1,
-      //   trade_type: 'JSAPI',
-      //   transaction_id: '4200000843202012174487377737'
-      // } 1234
+      // String tradeNo = request.getParameter("trade_no");
+      // String code = request.getParameter("out_trade_no");
+      // String tradeStatus = request.getParameter("trade_status");
+      // Enumeration<String> enumeration=request.getParameterNames();
+      // HashMap<String,String> map=new HashMap<>();
+      // while(enumeration.hasMoreElements()){
+      //   String name=enumeration.nextElement();
+      //   String value=request.getParameter(name);
+      //   map.put(name,value);
+      // }
+      // boolean bool=AlipaySignature.rsaCheckV1(map,microApp_publicKey,"UTF-8","RSA2");
+      // if(bool){
+      //   if ("TRADE_FINISHED".equals(tradeStatus) || "TRADE_SUCCESS".equals(tradeStatus)) {
+      //     UpdateWrapper wrapper = new UpdateWrapper();
+      //     wrapper.eq("code", code);
+      //     wrapper.set("status", 2);
+      //     wrapper.set("payment_type", 2);
+      //     orderService.update(wrapper);
+      //   }
+      //   response.setCharacterEncoding("utf-8");
+      //   Writer writer = response.getWriter();
+      //   writer.write("success");
+      //   writer.close();
+      // }
+      // else {
+      //   response.sendError(500,"数字签名验证失败");
+      // }
 
     });
 
@@ -260,4 +264,4 @@ class WxController extends Controller {
 
 }
 
-module.exports = WxController;
+module.exports = ZfbController;
